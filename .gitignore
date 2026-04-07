@@ -1,0 +1,16 @@
+# WoW/OS noise
+*.bak
+*.tmp
+Thumbs.db
+Desktop.ini
+
+# Mac
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Lua language server
+.luarc.json
+

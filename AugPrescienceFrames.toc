@@ -1,0 +1,9 @@
+## Interface: 120001
+## Title: Aug Prescience Frames
+## Notes: Quick Prescience targets for Augmentation Evoker.
+## Author: You + Cursor
+## Version: 0.1.0
+## RequiredDeps: ElvUI
+## Bindings: Bindings.xml
+
+AugPrescienceFrames.lua

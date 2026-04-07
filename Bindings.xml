@@ -1,0 +1,11 @@
+<Bindings>
+	<Binding name="AUGPRESCIENCEFRAMES_ADD_SLOT1" header="Aug Prescience Frames">
+		AugPrescienceFrames_AddSlot(1)
+	</Binding>
+	<Binding name="AUGPRESCIENCEFRAMES_ADD_SLOT2">
+		AugPrescienceFrames_AddSlot(2)
+	</Binding>
+	<Binding name="AUGPRESCIENCEFRAMES_CLEAR_SLOTS">
+		AugPrescienceFrames_ClearSlots()
+	</Binding>
+</Bindings>
