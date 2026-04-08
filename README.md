@@ -17,6 +17,8 @@ Two quick “slot” frames to help an Augmentation Evoker cast **Prescience** o
 - Use keybinds to **store a friendly player** into Slot 1/2.
 - **Click a slot** to cast **Prescience** on that stored player.
 - **Hover a slot** to make it the real `@mouseover` unit (so mouseover-cast macros work).
+- Shows **class color** (name + border) and a **Prescience buff tracker** icon with remaining time.
+- Optional **Prescience range** indicator: red frame border, dimmed bar, and **OOR** when the slotted player is out of cast range (toggle in ElvUI options).
 
 ## Keybinds (recommended setup)
 
@@ -46,10 +48,6 @@ If you want to cast Prescience without clicking the slot, you can bind a macro l
 
 Then **hover** Slot 1/2 and press your Prescience key.
 
-### Right-click targeting (for testing)
-
-Right-clicking a slot will **target** that stored unit. This is mainly to verify the slot is correctly providing a unit (and therefore that `[@mouseover]` should work).
-
 ## Moving the frames (ElvUI mover)
 
 1. Type `/moveui`
@@ -68,6 +66,7 @@ Options include:
 - Width / height / spacing
 - Transparent style
 - Clear slots
+- **Name** section: font size, strip opacity, shadow, outline, text color
 
 ## Slash commands
 

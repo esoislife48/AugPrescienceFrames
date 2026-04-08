@@ -2,6 +2,23 @@ local E, L, V, P, G = unpack(ElvUI)
 local APF = E:NewModule("AugPrescienceFrames", "AceEvent-3.0")
 local EP = LibStub("LibElvUIPlugin-1.0")
 
+-- Expressway via SharedMedia (same as ElvUI defaults), with safe fallbacks.
+local function GetExpresswayFont()
+	local LSM = E.Libs and E.Libs.LSM
+	if LSM and LSM.Fetch then
+		local ok, path = pcall(function()
+			return LSM:Fetch("font", "Expressway")
+		end)
+		if ok and path and path ~= "" then
+			return path
+		end
+	end
+	if E.media and E.media.normFont and E.media.normFont ~= "" then
+		return E.media.normFont
+	end
+	return "Fonts\\FRIZQT__.TTF"
+end
+
 -- Bindings text
 BINDING_HEADER_AUGPRESCIENCEFRAMES = "Aug Prescience Frames"
 BINDING_NAME_AUGPRESCIENCEFRAMES_ADD_SLOT1 = "Add current unit to Slot 1"
@@ -29,6 +46,113 @@ end
 -- Prescience spellID (Retail)
 local PRESCIENCE_SPELL_ID = 409311
 local PRESCIENCE_SPELL_NAME = (GetSpellInfo and GetSpellInfo(PRESCIENCE_SPELL_ID)) or "Prescience"
+local PRESCIENCE_ICON = (C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(PRESCIENCE_SPELL_ID)) or (GetSpellTexture and GetSpellTexture(PRESCIENCE_SPELL_ID))
+-- The aura on the target uses a different spellId than the cast spell.
+-- (Matches what AugBuffTracker tracks.)
+local PRESCIENCE_AURA_ID = 410089
+
+local function getSpellNameForMatch(spellID)
+	if C_Spell and C_Spell.GetSpellInfo then
+		local info = C_Spell.GetSpellInfo(spellID)
+		if info and info.name then
+			return info.name
+		end
+	end
+	if GetSpellInfo then
+		return GetSpellInfo(spellID)
+	end
+	return nil
+end
+
+-- spellId can be a "secret" number; direct == with a literal may error.
+local function auraMatchesSpellId(aura, spellID)
+	if not aura then
+		return false
+	end
+	local ok, same = pcall(function()
+		return aura.spellId == spellID
+	end)
+	if ok and same then
+		return true
+	end
+	local wantName = getSpellNameForMatch(spellID)
+	if wantName and aura.name then
+		local okName, sameName = pcall(function()
+			return aura.name == wantName
+		end)
+		if okName and sameName then
+			return true
+		end
+	end
+	return false
+end
+
+local function findAuraDataBySpellID(unit, spellID)
+	if not unit or not UnitExists(unit) then return nil end
+
+	-- Preferred: modern AuraUtil iterator (returns packed auraData tables)
+	if AuraUtil and AuraUtil.ForEachAura then
+		local found
+		AuraUtil.ForEachAura(unit, "HELPFUL", nil, function(aura)
+			if aura and auraMatchesSpellId(aura, spellID) then
+				found = aura
+				return true -- stop iteration
+			end
+			return false
+		end, true)
+		if found then return found end
+	end
+
+	-- Fallback: C_UnitAuras APIs
+	if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
+		for i = 1, 40 do
+			local aura = C_UnitAuras.GetAuraDataByIndex(unit, i, "HELPFUL")
+			if not aura then break end
+			if auraMatchesSpellId(aura, spellID) then
+				return aura
+			end
+		end
+	end
+
+	return nil
+end
+
+-- true = in range, false = out of range, nil = unknown / API unavailable
+local function prescienceInRange(unit)
+	if not unit or not UnitExists(unit) then
+		return nil
+	end
+	if C_Spell and C_Spell.IsSpellInRange then
+		local ok, r = pcall(function()
+			return C_Spell.IsSpellInRange(PRESCIENCE_SPELL_ID, unit)
+		end)
+		if ok and r ~= nil then
+			if r == true or r == 1 then return true end
+			if r == false or r == 0 then return false end
+		end
+	end
+	if IsSpellInRange then
+		local ok, v = pcall(function()
+			return IsSpellInRange(PRESCIENCE_SPELL_ID, "spell", unit)
+		end)
+		if ok and v ~= nil then
+			if v == true then return true end
+			if v == false then return false end
+			if v == 1 then return true end
+			if v == 0 then return false end
+		end
+		ok, v = pcall(function()
+			return IsSpellInRange(PRESCIENCE_SPELL_NAME, unit)
+		end)
+		if ok and v ~= nil then
+			if v == 1 then return true end
+			if v == 0 then return false end
+			if v == true then return true end
+			if v == false then return false end
+		end
+	end
+	return nil
+end
 
 P["AugPrescienceFrames"] = {
 	enabled = true,
@@ -36,8 +160,18 @@ P["AugPrescienceFrames"] = {
 	height = 28,
 	spacing = 6,
 	transparent = true,
+	showRangeIndicator = true,
 	slots = { nil, nil }, -- legacy (stored GUIDs); kept for migration
 	slotUnits = { nil, nil }, -- stores unit tokens like "raid5"/"party2"
+	-- Name readability (ElvUI options)
+	nameFontSize = 14,
+	nameStripAlpha = 0.72,
+	nameShadow = 3, -- 0 = off
+	nameOutline = "THICKOUTLINE", -- NONE | OUTLINE | THICKOUTLINE
+	nameR = 1,
+	nameG = 1,
+	nameB = 1,
+	nameA = 1,
 }
 
 function APF:DB()
@@ -123,6 +257,121 @@ end
 
 APF.frames = {}
 
+-- Keybinds can fire before ElvUI enables the module; ensure UI exists.
+function APF:EnsureFrames()
+	if not self.holder then
+		self:CreateHolder()
+	end
+	if not self.frames[1] then
+		self.frames[1] = self:CreateSlotFrame(1)
+	end
+	if not self.frames[2] then
+		self.frames[2] = self:CreateSlotFrame(2)
+	end
+	self:Layout()
+end
+
+function APF:ApplyNameStyle(f)
+	if not f or not f.nameText then return end
+	local db = self:DB()
+	local size = db.nameFontSize or 14
+	local outline = db.nameOutline or "THICKOUTLINE"
+	if outline == "NONE" or outline == "" then
+		outline = ""
+	end
+	f.nameText:SetFont(GetExpresswayFont(), size, outline)
+
+	local sh = db.nameShadow or 0
+	if sh <= 0 then
+		f.nameText:SetShadowOffset(0, 0)
+		f.nameText:SetShadowColor(0, 0, 0, 0)
+	else
+		f.nameText:SetShadowOffset(sh, -sh)
+		f.nameText:SetShadowColor(0, 0, 0, 1)
+	end
+
+	if f.nameBG then
+		f.nameBG:SetColorTexture(0, 0, 0, db.nameStripAlpha or 0.72)
+	end
+end
+
+function APF:ApplyRangeVisualsToSlot(f, unit)
+	if not f then
+		return
+	end
+	local db = self:DB()
+	local cr, cg, cb = f._classR or 0.35, f._classG or 0.75, f._classB or 0.35
+
+	if db.showRangeIndicator == false or not unit or not UnitExists(unit) then
+		if f.SetBackdropBorderColor then
+			f:SetBackdropBorderColor(cr, cg, cb, 1)
+		end
+		if f.rangeText then
+			f.rangeText:Hide()
+		end
+		if f.hp then
+			f.hp:SetAlpha(1)
+		end
+		return
+	end
+
+	local inRange = prescienceInRange(unit)
+	if inRange == false then
+		if f.SetBackdropBorderColor then
+			f:SetBackdropBorderColor(1, 0.18, 0.22, 1)
+		end
+		if f.rangeText then
+			f.rangeText:SetText("OOR")
+			f.rangeText:SetTextColor(1, 0.4, 0.4, 1)
+			f.rangeText:Show()
+		end
+		if f.hp then
+			f.hp:SetAlpha(0.5)
+		end
+	elseif inRange == true then
+		if f.SetBackdropBorderColor then
+			f:SetBackdropBorderColor(cr, cg, cb, 1)
+		end
+		if f.rangeText then
+			f.rangeText:Hide()
+		end
+		if f.hp then
+			f.hp:SetAlpha(1)
+		end
+	else
+		if f.SetBackdropBorderColor then
+			f:SetBackdropBorderColor(0.55, 0.55, 0.55, 1)
+		end
+		if f.rangeText then
+			f.rangeText:SetText("?")
+			f.rangeText:SetTextColor(0.85, 0.85, 0.85, 1)
+			f.rangeText:Show()
+		end
+		if f.hp then
+			f.hp:SetAlpha(0.88)
+		end
+	end
+end
+
+function APF:UpdateRangeVisualsOnly()
+	if not self.initialized or not self.frames[1] then
+		return
+	end
+	local db = self:DB()
+	if db.showRangeIndicator == false then
+		return
+	end
+	if not db.enabled or not isAugEvoker() or not spellKnown(PRESCIENCE_SPELL_ID) then
+		return
+	end
+	for i = 1, 2 do
+		local f = self.frames[i]
+		if f and db.slotUnits[i] and UnitExists(db.slotUnits[i]) then
+			self:ApplyRangeVisualsToSlot(f, db.slotUnits[i])
+		end
+	end
+end
+
 function APF:CreateHolder()
 	if self.holder then return end
 
@@ -157,26 +406,72 @@ function APF:CreateSlotFrame(slot)
 	f.hpBG:SetAllPoints(f.hp)
 	f.hpBG:SetColorTexture(0, 0, 0, 0.25)
 
-	f.nameText = f:CreateFontString(nil, "OVERLAY")
-	f.nameText:SetFont(E.media.normFont, 12, "OUTLINE")
+	-- Overlay frame above the StatusBar (child frames can render above parent regions).
+	f.overlay = CreateFrame("Frame", nil, f)
+	f.overlay:SetAllPoints(f)
+	f.overlay:SetFrameLevel((f.hp:GetFrameLevel() or 1) + 5)
+
+	-- Dark strip behind the name for readability
+	f.nameBG = f.overlay:CreateTexture(nil, "BORDER")
+	f.nameBG:SetColorTexture(0, 0, 0, 0.45)
+	f.nameBG:SetPoint("TOPLEFT", f, "TOPLEFT", 2, -2)
+	f.nameBG:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 2, 2)
+	f.nameBG:SetWidth(110) -- adjusted in Layout()
+
+	-- Buff tracker (Prescience) on the right
+	f.buff = CreateFrame("Frame", nil, f, "BackdropTemplate")
+	f.buff:SetSize(db.height, db.height)
+	f.buff:SetPoint("LEFT", f, "RIGHT", 6, 0)
+	f.buff:SetTemplate(db.transparent and "Transparent" or "Default")
+
+	f.buff.icon = f.buff:CreateTexture(nil, "ARTWORK")
+	f.buff.icon:SetPoint("TOPLEFT", f.buff, "TOPLEFT", 2, -2)
+	f.buff.icon:SetPoint("BOTTOMRIGHT", f.buff, "BOTTOMRIGHT", -2, 2)
+	f.buff.icon:SetTexture(PRESCIENCE_ICON or 134400) -- fallback icon id
+	f.buff.icon:SetTexCoord(unpack(E.TexCoords))
+
+	f.buff.cd = CreateFrame("Cooldown", nil, f.buff, "CooldownFrameTemplate")
+	f.buff.cd:SetAllPoints(f.buff.icon)
+	f.buff.cd:SetDrawEdge(false)
+	f.buff.cd:SetDrawBling(false)
+	f.buff.cd:SetReverse(true)
+
+	f.buff.timeText = f.buff:CreateFontString(nil, "OVERLAY")
+	f.buff.timeText:SetFont(GetExpresswayFont(), 11, "OUTLINE")
+	f.buff.timeText:SetPoint("CENTER", f.buff, "CENTER", 0, 0)
+	f.buff.timeText:SetJustifyH("CENTER")
+	f.buff.timeText:SetText("")
+
+	f.nameText = f.overlay:CreateFontString(nil, "OVERLAY")
 	f.nameText:SetPoint("LEFT", f, "LEFT", 8, 0)
 	f.nameText:SetJustifyH("LEFT")
+	f.nameText:SetWordWrap(false)
+	f.nameText:SetNonSpaceWrap(false)
+	f.nameText:SetMaxLines(1)
+	self:ApplyNameStyle(f)
 	f.nameText:SetText("—")
 
 	f.slotText = f:CreateFontString(nil, "OVERLAY")
-	f.slotText:SetFont(E.media.normFont, 11, "OUTLINE")
+	f.slotText:SetFont(GetExpresswayFont(), 11, "OUTLINE")
 	f.slotText:SetPoint("RIGHT", f, "RIGHT", -6, 0)
 	f.slotText:SetJustifyH("RIGHT")
 	f.slotText:SetText("S" .. slot)
+
+	-- Out-of-range label (Prescience); updated by range ticker + UpdateVisuals
+	f.rangeText = f.overlay:CreateFontString(nil, "OVERLAY")
+	f.rangeText:SetFont(GetExpresswayFont(), 10, "OUTLINE")
+	f.rangeText:SetPoint("BOTTOM", f, "BOTTOM", 0, 4)
+	f.rangeText:SetJustifyH("CENTER")
+	f.rangeText:SetTextColor(1, 0.35, 0.35, 1)
+	f.rangeText:SetShadowColor(0, 0, 0, 1)
+	f.rangeText:SetShadowOffset(1, -1)
+	f.rangeText:Hide()
 
 	-- Secure click-cast (left click defaults)
 	f:SetAttribute("*type1", "spell")
 	f:SetAttribute("*spell1", PRESCIENCE_SPELL_NAME)
 	f:SetAttribute("checkselfcast", false)
 	f:RegisterForClicks("AnyUp")
-
-	-- QoL: right-click to target the stored unit (useful for verifying slots)
-	f:SetAttribute("*type2", "target")
 
 	-- Tooltip (debug/QoL): show what unit token this slot is pointing at.
 	f:SetScript("OnEnter", function(self)
@@ -201,6 +496,11 @@ end
 
 function APF:Layout()
 	if not self.holder then return end
+	-- Secure slot buttons cannot be resized/repositioned in combat.
+	if InCombatLockdown() then
+		pendingLayout = true
+		return
+	end
 	local db = self:DB()
 
 	self.holder:SetSize(db.width, (db.height * 2) + db.spacing)
@@ -211,6 +511,25 @@ function APF:Layout()
 		if f then
 			f:SetSize(db.width, db.height)
 			f:SetTemplate(db.transparent and "Transparent" or "Default")
+
+			if f.nameBG then
+				-- Keep a readable strip that scales with the frame width.
+				local stripW = math.max(90, db.width - (db.height + 6) - 40) -- leave room for slotText and buff
+				f.nameBG:SetWidth(stripW)
+			end
+
+			if f.nameText then
+				local textW = math.max(60, db.width - (db.height + 6) - 60)
+				f.nameText:SetWidth(textW)
+			end
+
+			self:ApplyNameStyle(f)
+
+			if f.buff then
+				f.buff:SetSize(db.height, db.height)
+				f.buff:SetTemplate(db.transparent and "Transparent" or "Default")
+			end
+
 			f:ClearAllPoints()
 			if i == 1 then
 				f:SetPoint("TOPLEFT", self.holder, "TOPLEFT", 0, 0)
@@ -223,6 +542,68 @@ end
 
 local pendingSecureUpdate = false
 local pendingVisibilityUpdate = false
+local pendingLayout = false
+
+-- UNIT_AURA etc. fire for the whole raid; ignore unless the unit is one of our slots.
+-- Unit tokens / DB values can be "secret" types: never use `if tok`, `not x`, or `==` on them
+-- outside pcall — that throws "boolean test on a secret boolean/string".
+function APF:ShouldHandleUnitEvent(event, unit)
+	local ok, allow = pcall(function()
+		local spammy = {
+			UNIT_AURA = true,
+			UNIT_HEALTH = true,
+			UNIT_MAXHEALTH = true,
+			UNIT_NAME_UPDATE = true,
+			UNIT_CONNECTION = true,
+		}
+		if type(event) ~= "string" or not spammy[event] then
+			return true
+		end
+		if type(unit) ~= "string" or unit == "" then
+			return true
+		end
+
+		local db = self:DB()
+		local su = db.slotUnits
+		if type(su) ~= "table" then
+			return false
+		end
+
+		for i = 1, 2 do
+			local tok = su[i]
+			if type(tok) == "string" and tok ~= "" and unit == tok then
+				return true
+			end
+		end
+		return false
+	end)
+
+	if not ok then
+		-- Fail open: refresh occasionally wrong > spam errors / missed UI.
+		return true
+	end
+	return allow
+end
+
+-- Coalesce burst events into one refresh (stops allocation/GC churn from aura spam).
+function APF:ScheduleCoalescedRefresh()
+	if self._eventCoalesceTimer then
+		self._eventCoalesceTimer:Cancel()
+		self._eventCoalesceTimer = nil
+	end
+	if not C_Timer or not C_Timer.NewTimer then
+		self:RefreshEnabledState()
+		self:UpdateSecureUnitAttributes()
+		self:UpdateVisuals()
+		return
+	end
+	self._eventCoalesceTimer = C_Timer.NewTimer(0.08, function()
+		self._eventCoalesceTimer = nil
+		self:RefreshEnabledState()
+		self:UpdateSecureUnitAttributes()
+		self:UpdateVisuals()
+	end)
+end
 
 function APF:SetSlotUnit(slot, unitToken)
 	local db = self:DB()
@@ -235,17 +616,21 @@ function APF:UpdateSecureUnitAttributes()
 		return
 	end
 
+	self:EnsureFrames()
+
 	for slot = 1, 2 do
 		local unit = self:DB().slotUnits[slot]
 		local f = self.frames[slot]
-		if unit and UnitExists(unit) then
-			f:SetAttribute("unit", unit)
-			-- Ensure secure actions explicitly use this unit.
-			f:SetAttribute("*unit1", unit) -- left click (spell)
-			f:SetAttribute("*unit2", unit) -- right click (target)
-		else
-			f:SetAttribute("unit", nil)
-			f:SetAttribute("*unit1", nil)
+		if f then
+			if unit and UnitExists(unit) then
+				f:SetAttribute("unit", unit)
+				f:SetAttribute("*unit1", unit) -- left click (spell)
+			else
+				f:SetAttribute("unit", nil)
+				f:SetAttribute("*unit1", nil)
+			end
+			-- Do not bind right-click actions (no target on right-click).
+			f:SetAttribute("*type2", nil)
 			f:SetAttribute("*unit2", nil)
 		end
 	end
@@ -254,17 +639,57 @@ function APF:UpdateSecureUnitAttributes()
 end
 
 function APF:UpdateVisuals()
+	self:EnsureFrames()
+
+	local db = self:DB()
 	for slot = 1, 2 do
-		local unit = self:DB().slotUnits[slot]
+		local unit = db.slotUnits[slot]
 		local f = self.frames[slot]
+		if f then
+			local name = unitDisplayName(unit)
+			local r, g, b = unitColor(unit)
 
-		local name = unitDisplayName(unit)
-		local pct = getHealthPct(unit)
-		local r, g, b = unitColor(unit)
+			f.nameText:SetText(name)
+			f.nameText:SetTextColor(db.nameR or 1, db.nameG or 1, db.nameB or 1, db.nameA or 1)
 
-		f.nameText:SetText(name)
-		f.hp:SetValue(pct)
-		f.hp:SetStatusBarColor(r, g, b, 0.9)
+			-- Solid class-color fill (not health-based)
+			f.hp:SetValue(1)
+			f.hp:SetStatusBarColor(r, g, b, 0.95)
+			f._classR, f._classG, f._classB = r, g, b
+
+			self:ApplyRangeVisualsToSlot(f, unit)
+
+			-- Buff tracker: Prescience remaining
+			if f.buff then
+				f.buff.timeText:SetText("")
+				f.buff.cd:Clear()
+				f.buff:SetAlpha(0.25)
+
+				if unit and UnitExists(unit) then
+					local aura = findAuraDataBySpellID(unit, PRESCIENCE_AURA_ID)
+					if aura and (not aura.sourceUnit or aura.sourceUnit == "player") then
+						f.buff:SetAlpha(1)
+						if aura.icon then f.buff.icon:SetTexture(aura.icon) end
+
+						local duration = aura.duration
+						local expirationTime = aura.expirationTime
+						if duration and expirationTime and duration > 0 and expirationTime > 0 then
+							local startTime = expirationTime - duration
+							f.buff.cd:SetCooldown(startTime, duration)
+
+							local remaining = expirationTime - GetTime()
+							if remaining and remaining > 0 then
+								if remaining >= 10 then
+									f.buff.timeText:SetText(("%d"):format(remaining + 0.5))
+								else
+									f.buff.timeText:SetText(("%.1f"):format(remaining))
+								end
+							end
+						end
+					end
+				end
+			end
+		end
 	end
 end
 
@@ -272,21 +697,25 @@ function APF:RefreshEnabledState()
 	local db = self:DB()
 	local shouldShow = db.enabled and isAugEvoker() and spellKnown(PRESCIENCE_SPELL_ID)
 
-	-- Secure frames can't be shown/hidden safely in combat.
-	-- Instead, we keep them shown and "soft disable" via alpha + mouse.
+	-- Secure frames can't be shown/hidden or laid out in combat (SetSize/SetPoint taint).
 	if InCombatLockdown() then
 		pendingVisibilityUpdate = true
+		pendingLayout = true
 		return
 	end
+
+	self:EnsureFrames()
 
 	local anyVisible = false
 	for i = 1, 2 do
 		local f = self.frames[i]
-		local unit = self:DB().slotUnits[i]
-		local showThis = shouldShow and unit and UnitExists(unit)
-		f:SetAlpha(showThis and 1 or 0)
-		f:EnableMouse(showThis)
-		anyVisible = anyVisible or showThis
+		if f then
+			local unit = self:DB().slotUnits[i]
+			local showThis = shouldShow and unit and UnitExists(unit)
+			f:SetAlpha(showThis and 1 or 0)
+			f:EnableMouse(showThis)
+			anyVisible = anyVisible or showThis
+		end
 	end
 
 	-- Hide the holder background if no slots are visible.
@@ -308,7 +737,21 @@ function APF:RefreshEnabledState()
 	end
 end
 
+-- Restored legacy helper (used in older versions / debugging)
+local function guidFromBestUnit()
+	-- Priority: target > mouseover > focus (so keybinds feel natural)
+	local units = { "target", "mouseover", "focus" }
+	for _, unit in ipairs(units) do
+		if UnitExists(unit) and UnitIsPlayer(unit) and UnitIsFriend("player", unit) then
+			return UnitGUID(unit)
+		end
+	end
+	return nil
+end
+
 function APF:AddSlot(slot)
+	self:EnsureFrames()
+
 	slot = tonumber(slot)
 	if slot ~= 1 and slot ~= 2 then return end
 
@@ -330,6 +773,8 @@ function APF:AddSlot(slot)
 end
 
 function APF:ClearSlots()
+	self:EnsureFrames()
+
 	local db = self:DB()
 	db.slotUnits[1] = nil
 	db.slotUnits[2] = nil
@@ -386,6 +831,12 @@ function APF:InsertOptions()
 		args = {
 			enabled = { order = 1, type = "toggle", name = "Enable" },
 			transparent = { order = 2, type = "toggle", name = "Transparent" },
+			showRangeIndicator = {
+				order = 2.5,
+				type = "toggle",
+				name = "Range (Prescience)",
+				desc = "Show when the slotted player is out of range to cast Prescience (red border + OOR).",
+			},
 			width = { order = 3, type = "range", name = "Width", min = 80, max = 400, step = 1 },
 			height = { order = 4, type = "range", name = "Height", min = 16, max = 60, step = 1 },
 			spacing = { order = 5, type = "range", name = "Spacing", min = 0, max = 40, step = 1 },
@@ -395,8 +846,54 @@ function APF:InsertOptions()
 				name = "Clear Slots",
 				func = function() self:ClearSlots() end,
 			},
+			nameHeader = { order = 7, type = "header", name = "Name" },
+			nameFontSize = { order = 8, type = "range", name = "Font size", min = 8, max = 24, step = 1 },
+			nameStripAlpha = {
+				order = 9,
+				type = "range",
+				name = "Name strip opacity",
+				desc = "Dark bar behind the player name (0 = invisible, 1 = solid).",
+				min = 0,
+				max = 1,
+				step = 0.05,
+			},
+			nameShadow = {
+				order = 10,
+				type = "range",
+				name = "Text shadow",
+				desc = "0 disables the drop shadow.",
+				min = 0,
+				max = 5,
+				step = 1,
+			},
+			nameOutline = {
+				order = 11,
+				type = "select",
+				name = "Outline",
+				values = {
+					NONE = "None",
+					OUTLINE = "Outline",
+					THICKOUTLINE = "Thick outline",
+				},
+			},
+			nameColor = {
+				order = 12,
+				type = "color",
+				name = "Text color",
+				hasAlpha = true,
+				get = function()
+					local d = self:DB()
+					return d.nameR or 1, d.nameG or 1, d.nameB or 1, d.nameA or 1
+				end,
+				set = function(_, r, g, b, a)
+					local d = self:DB()
+					d.nameR, d.nameG, d.nameB, d.nameA = r, g, b, a
+					self:Layout()
+					self:UpdateVisuals()
+				end,
+			},
 			desc = {
-				order = 7,
+				order = 13,
 				type = "description",
 				name = "Use keybinds to assign Slot 1/2 from target/mouseover/focus. Click a slot to cast Prescience on it.\nMover: Aug Prescience Frames.",
 			},
@@ -410,22 +907,44 @@ end
 
 function APF:OnEnable()
 	self:InitializeModule()
+	self:EnsureRangeTicker()
+end
+
+function APF:OnDisable()
+	if self._rangeTicker then
+		self._rangeTicker:Cancel()
+		self._rangeTicker = nil
+	end
+	if self._eventCoalesceTimer then
+		self._eventCoalesceTimer:Cancel()
+		self._eventCoalesceTimer = nil
+	end
+end
+
+function APF:EnsureRangeTicker()
+	if not C_Timer or not C_Timer.NewTicker then
+		return
+	end
+	if self._rangeTicker then
+		return
+	end
+	self._rangeTicker = C_Timer.NewTicker(0.35, function()
+		self:UpdateRangeVisualsOnly()
+	end)
 end
 
 function APF:InitializeModule()
 	if self.initialized then return end
-	self.initialized = true
 
-	self:CreateHolder()
-	self.frames[1] = self:CreateSlotFrame(1)
-	self.frames[2] = self:CreateSlotFrame(2)
-	self:Layout()
+	self:EnsureFrames()
+	self.initialized = true
 
 	self:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED", "OnEventRefresh")
 	self:RegisterEvent("PLAYER_ENTERING_WORLD", "OnEventRefresh")
 	self:RegisterEvent("GROUP_ROSTER_UPDATE", "OnEventRefresh")
 	self:RegisterEvent("UNIT_CONNECTION", "OnEventRefresh")
 	self:RegisterEvent("UNIT_NAME_UPDATE", "OnEventRefresh")
+	self:RegisterEvent("UNIT_AURA", "OnEventRefresh")
 	self:RegisterEvent("UNIT_HEALTH", "OnEventRefresh")
 	self:RegisterEvent("UNIT_MAXHEALTH", "OnEventRefresh")
 	self:RegisterEvent("PLAYER_REGEN_ENABLED", "OnRegenEnabled")
@@ -447,6 +966,11 @@ function APF:InitializeModule()
 end
 
 function APF:OnRegenEnabled()
+	if pendingLayout then
+		pendingLayout = false
+		self:Layout()
+	end
+
 	if pendingSecureUpdate then
 		self:UpdateSecureUnitAttributes()
 	end
@@ -459,10 +983,11 @@ function APF:OnRegenEnabled()
 	self:UpdateVisuals()
 end
 
-function APF:OnEventRefresh()
-	self:RefreshEnabledState()
-	self:UpdateSecureUnitAttributes()
-	self:UpdateVisuals()
+function APF:OnEventRefresh(event, unit)
+	if not self:ShouldHandleUnitEvent(event, unit) then
+		return
+	end
+	self:ScheduleCoalescedRefresh()
 end
 
 E:RegisterModule(APF:GetName())
