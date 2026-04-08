@@ -19,6 +19,7 @@ Two quick “slot” frames to help an Augmentation Evoker cast **Prescience** o
 - **Hover a slot** to make it the real `@mouseover` unit (so mouseover-cast macros work).
 - Shows **class color** (name + border) and a **Prescience buff tracker** icon with remaining time.
 - Optional **Prescience range** indicator: red frame border, dimmed bar, and **OOR** when the slotted player is out of cast range (toggle in ElvUI options).
+- Optional **Sense Power** cyan pulse glow on a slot when that player has Sense Power (toggle in ElvUI options).
 
 ## Keybinds (recommended setup)
 

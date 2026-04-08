@@ -50,6 +50,8 @@ local PRESCIENCE_ICON = (C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpel
 -- The aura on the target uses a different spellId than the cast spell.
 -- (Matches what AugBuffTracker tracks.)
 local PRESCIENCE_AURA_ID = 410089
+-- Sense Power (Evoker); buff on target may share spell id or resolve by name via aura matcher.
+local SENSE_POWER_SPELL_ID = 361021
 
 local function getSpellNameForMatch(spellID)
 	if C_Spell and C_Spell.GetSpellInfo then
@@ -161,6 +163,7 @@ P["AugPrescienceFrames"] = {
 	spacing = 6,
 	transparent = true,
 	showRangeIndicator = true,
+	showSensePowerGlow = true,
 	slots = { nil, nil }, -- legacy (stored GUIDs); kept for migration
 	slotUnits = { nil, nil }, -- stores unit tokens like "raid5"/"party2"
 	-- Name readability (ElvUI options)
@@ -293,6 +296,62 @@ function APF:ApplyNameStyle(f)
 	if f.nameBG then
 		f.nameBG:SetColorTexture(0, 0, 0, db.nameStripAlpha or 0.72)
 	end
+end
+
+-- Cyan/teal ADD border when Sense Power is up on the slotted unit.
+function APF:CreateSensePowerGlow(f)
+	local g = CreateFrame("Frame", nil, f)
+	g:SetFrameStrata(f:GetFrameStrata())
+	g:SetFrameLevel((f.overlay:GetFrameLevel() or 10) + 8)
+	g:SetPoint("TOPLEFT", f, "TOPLEFT", -4, 4)
+	g:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 4, -4)
+	g:Hide()
+
+	local cr, cg, cb, baseA = 0.15, 0.92, 1.0, 0.75
+	local thick = 3
+
+	local top = g:CreateTexture(nil, "OVERLAY")
+	top:SetBlendMode("ADD")
+	top:SetColorTexture(cr, cg, cb, baseA)
+	top:SetPoint("TOPLEFT", g, "TOPLEFT", 0, 0)
+	top:SetPoint("TOPRIGHT", g, "TOPRIGHT", 0, 0)
+	top:SetHeight(thick)
+
+	local bot = g:CreateTexture(nil, "OVERLAY")
+	bot:SetBlendMode("ADD")
+	bot:SetColorTexture(cr, cg, cb, baseA)
+	bot:SetPoint("BOTTOMLEFT", g, "BOTTOMLEFT", 0, 0)
+	bot:SetPoint("BOTTOMRIGHT", g, "BOTTOMRIGHT", 0, 0)
+	bot:SetHeight(thick)
+
+	local left = g:CreateTexture(nil, "OVERLAY")
+	left:SetBlendMode("ADD")
+	left:SetColorTexture(cr, cg, cb, baseA)
+	left:SetPoint("TOPLEFT", g, "TOPLEFT", 0, 0)
+	left:SetPoint("BOTTOMLEFT", g, "BOTTOMLEFT", 0, 0)
+	left:SetWidth(thick)
+
+	local right = g:CreateTexture(nil, "OVERLAY")
+	right:SetBlendMode("ADD")
+	right:SetColorTexture(cr, cg, cb, baseA)
+	right:SetPoint("TOPRIGHT", g, "TOPRIGHT", 0, 0)
+	right:SetPoint("BOTTOMRIGHT", g, "BOTTOMRIGHT", 0, 0)
+	right:SetWidth(thick)
+
+	g._pulse = 0
+	g:SetScript("OnUpdate", function(self, elapsed)
+		if not self:IsShown() then
+			return
+		end
+		self._pulse = (self._pulse or 0) + (elapsed or 0) * 2.8
+		local m = 0.72 + 0.28 * math.sin(self._pulse)
+		top:SetColorTexture(cr, cg, cb, baseA * m)
+		bot:SetColorTexture(cr, cg, cb, baseA * m)
+		left:SetColorTexture(cr, cg, cb, baseA * m)
+		right:SetColorTexture(cr, cg, cb, baseA * m)
+	end)
+
+	f.senseGlowFrame = g
 end
 
 function APF:ApplyRangeVisualsToSlot(f, unit)
@@ -490,6 +549,8 @@ function APF:CreateSlotFrame(slot)
 	f:SetScript("OnLeave", function()
 		if GameTooltip then GameTooltip:Hide() end
 	end)
+
+	self:CreateSensePowerGlow(f)
 
 	return f
 end
@@ -689,6 +750,19 @@ function APF:UpdateVisuals()
 					end
 				end
 			end
+
+			-- Sense Power glow on slotted unit
+			if f.senseGlowFrame then
+				local showGlow = db.showSensePowerGlow ~= false
+					and unit
+					and UnitExists(unit)
+					and findAuraDataBySpellID(unit, SENSE_POWER_SPELL_ID)
+				if showGlow then
+					f.senseGlowFrame:Show()
+				else
+					f.senseGlowFrame:Hide()
+				end
+			end
 		end
 	end
 end
@@ -836,6 +910,12 @@ function APF:InsertOptions()
 				type = "toggle",
 				name = "Range (Prescience)",
 				desc = "Show when the slotted player is out of range to cast Prescience (red border + OOR).",
+			},
+			showSensePowerGlow = {
+				order = 2.6,
+				type = "toggle",
+				name = "Sense Power glow",
+				desc = "Pulse glow on the slot when Sense Power is active on that player.",
 			},
 			width = { order = 3, type = "range", name = "Width", min = 80, max = 400, step = 1 },
 			height = { order = 4, type = "range", name = "Height", min = 16, max = 60, step = 1 },
