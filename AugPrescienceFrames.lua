@@ -51,7 +51,7 @@ local PRESCIENCE_ICON = (C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpel
 -- (Matches what AugBuffTracker tracks.)
 local PRESCIENCE_AURA_ID = 410089
 -- Sense Power (Evoker); buff on target may share spell id or resolve by name via aura matcher.
-local SENSE_POWER_SPELL_ID = 361021
+local SENSE_POWER_SPELL_ID = 361022
 
 local function getSpellNameForMatch(spellID)
 	if C_Spell and C_Spell.GetSpellInfo then
