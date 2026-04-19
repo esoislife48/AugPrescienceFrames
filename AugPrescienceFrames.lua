@@ -50,8 +50,8 @@ local PRESCIENCE_ICON = (C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpel
 -- The aura on the target uses a different spellId than the cast spell.
 -- (Matches what AugBuffTracker tracks.)
 local PRESCIENCE_AURA_ID = 410089
--- Sense Power (Evoker); buff on target may share spell id or resolve by name via aura matcher.
-local SENSE_POWER_SPELL_ID = 361022
+-- Sense Power (Evoker). Retail spell is 361021; 361022 kept as fallback for aura/API quirks.
+local SENSE_POWER_SPELL_IDS = { 361021, 361022 }
 
 local function getSpellNameForMatch(spellID)
 	if C_Spell and C_Spell.GetSpellInfo then
@@ -92,7 +92,53 @@ end
 local function findAuraDataBySpellID(unit, spellID)
 	if not unit or not UnitExists(unit) then return nil end
 
-	-- Preferred: modern AuraUtil iterator (returns packed auraData tables)
+	local CUA = C_UnitAuras
+
+	-- Player-only helper (often safest/fastest for self auras).
+	if unit == "player" and CUA and CUA.GetPlayerAuraBySpellID then
+		local ok, aura = pcall(function()
+			return CUA.GetPlayerAuraBySpellID(spellID)
+		end)
+		if ok and aura then
+			return aura
+		end
+	end
+
+	-- 1) Direct by spell id (fast; Blizzard only permits this for whitelisted spells during
+	-- encounters / M+ — others return nil, same as "not found".)
+	if CUA and CUA.GetUnitAuraBySpellID then
+		local ok, aura = pcall(function()
+			return CUA.GetUnitAuraBySpellID(unit, spellID)
+		end)
+		if ok and aura then
+			return aura
+		end
+	end
+
+	-- 2) Lookup by spell name — often still works in dungeons when iterative scans cannot
+	-- compare aura.spellId to literals ("secret" values) and GetUnitAuraBySpellID is blocked.
+	if CUA and CUA.GetAuraDataBySpellName then
+		local wantName = getSpellNameForMatch(spellID)
+		if wantName and wantName ~= "" then
+			local nameFilters = { "HELPFUL|PLAYER", "PLAYER|HELPFUL", "HELPFUL" }
+			for i = 1, #nameFilters do
+				local ok, aura = pcall(function()
+					return CUA.GetAuraDataBySpellName(unit, wantName, nameFilters[i])
+				end)
+				if ok and aura then
+					return aura
+				end
+			end
+			local okAll, auraAll = pcall(function()
+				return CUA.GetAuraDataBySpellName(unit, wantName)
+			end)
+			if okAll and auraAll then
+				return auraAll
+			end
+		end
+	end
+
+	-- 3) Iterator (packed aura data)
 	if AuraUtil and AuraUtil.ForEachAura then
 		local found
 		AuraUtil.ForEachAura(unit, "HELPFUL", nil, function(aura)
@@ -105,17 +151,38 @@ local function findAuraDataBySpellID(unit, spellID)
 		if found then return found end
 	end
 
-	-- Fallback: C_UnitAuras APIs
-	if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
-		for i = 1, 40 do
-			local aura = C_UnitAuras.GetAuraDataByIndex(unit, i, "HELPFUL")
-			if not aura then break end
-			if auraMatchesSpellId(aura, spellID) then
-				return aura
+	-- 4) Index scan: try player buffs first (narrower list), then all helpful.
+	if CUA and CUA.GetAuraDataByIndex then
+		local indexFilters = { "HELPFUL|PLAYER", "HELPFUL" }
+		for fi = 1, #indexFilters do
+			local filt = indexFilters[fi]
+			for i = 1, 80 do
+				local ok, aura = pcall(function()
+					return CUA.GetAuraDataByIndex(unit, i, filt)
+				end)
+				if not ok or not aura then
+					break
+				end
+				if auraMatchesSpellId(aura, spellID) then
+					return aura
+				end
 			end
 		end
 	end
 
+	return nil
+end
+
+local function findSensePowerAura(unit)
+	if not unit or not UnitExists(unit) then
+		return nil
+	end
+	for i = 1, #SENSE_POWER_SPELL_IDS do
+		local a = findAuraDataBySpellID(unit, SENSE_POWER_SPELL_IDS[i])
+		if a then
+			return a
+		end
+	end
 	return nil
 end
 
@@ -532,24 +599,6 @@ function APF:CreateSlotFrame(slot)
 	f:SetAttribute("checkselfcast", false)
 	f:RegisterForClicks("AnyUp")
 
-	-- Tooltip (debug/QoL): show what unit token this slot is pointing at.
-	f:SetScript("OnEnter", function(self)
-		if not GameTooltip then return end
-		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-		local unit = self:GetAttribute("unit")
-		if unit and UnitExists(unit) then
-			GameTooltip:SetUnit(unit)
-			GameTooltip:AddLine(" ")
-			GameTooltip:AddLine(("APF unit token: %s"):format(unit), 0.7, 0.7, 0.7)
-		else
-			GameTooltip:AddLine("Empty slot", 0.8, 0.8, 0.8)
-		end
-		GameTooltip:Show()
-	end)
-	f:SetScript("OnLeave", function()
-		if GameTooltip then GameTooltip:Hide() end
-	end)
-
 	self:CreateSensePowerGlow(f)
 
 	return f
@@ -703,6 +752,10 @@ function APF:UpdateVisuals()
 	self:EnsureFrames()
 
 	local db = self:DB()
+	-- Self-toggle: Sense Power is usually a buff on the player while active; show glow on all
+	-- filled slots without requiring you to target those units (boss targeting is common).
+	local sensePowerOnPlayer = findSensePowerAura("player") ~= nil
+
 	for slot = 1, 2 do
 		local unit = db.slotUnits[slot]
 		local f = self.frames[slot]
@@ -753,10 +806,10 @@ function APF:UpdateVisuals()
 
 			-- Sense Power glow on slotted unit
 			if f.senseGlowFrame then
+				local unitHasSensePower = unit and UnitExists(unit) and findSensePowerAura(unit) ~= nil
 				local showGlow = db.showSensePowerGlow ~= false
-					and unit
-					and UnitExists(unit)
-					and findAuraDataBySpellID(unit, SENSE_POWER_SPELL_ID)
+					and unit and UnitExists(unit)
+					and (unitHasSensePower or sensePowerOnPlayer)
 				if showGlow then
 					f.senseGlowFrame:Show()
 				else
